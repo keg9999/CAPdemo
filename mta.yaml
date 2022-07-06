@@ -1,0 +1,129 @@
+---
+_schema-version: '3.1'
+ID: cpapp
+version: 1.0.0
+description: "A simple CAP project."
+parameters:
+  enable-parallel-deployments: true
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm install --production
+        - npx -p @sap/cds-dk cds build --production
+        - npx rimraf gen/db/src/gen/data
+
+modules:
+  - name: cpapp-srv # CAP 서비스의 대상. 서비스에 액세스하려면 SAP Launchpad 서비스에서 실행되는 UI가 필요함.
+    type: nodejs
+    path: gen/srv
+    parameters:
+      buildpack: nodejs_buildpack
+    build-parameters:
+      builder: npm-ci
+    provides:
+      - name: srv-api # required by consumers of CAP services (e.g. approuter)
+        properties:
+          srv-url: ${default-url}
+    requires:
+      - name: cpapp-db
+      - name: cpapp-auth
+
+  - name: cpapp-db-deployer
+    type: hdb
+    path: gen/db
+    parameters:
+      buildpack: nodejs_buildpack
+    requires:
+      - name: cpapp-db
+
+resources:
+  - name: cpapp-db
+    type: com.sap.xs.hdi-container
+    parameters:
+      service: hana # or 'hanatrial' on trial landscapes
+      service-plan: hdi-shared
+
+  - name: cpapp-auth
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: ./xs-security.json
+      config:
+        xsappname: cpapp-${org}-${space}
+        tenant-mode: dedicated
+
+  - name: cpapp-uaa #XSUAA 서비스 인스턴스의 대상. SAP Launchpad 서비스는 CAP 서비스와 함께 사용할 OAuth 토큰을 변환하는 데 필요함.
+    type: org.cloudfoundry.managed-service
+    parameters:
+     service: xsuaa
+     service-plan: application
+     path: ./xs-security.json
+     config:
+       xsappname: cpapp-${space}    #  name + space dependency
+       tenant-mode: dedicated
+       role-collections:
+         - name: 'RiskManager-${space}'
+           description: Manage Risks
+           role-template-references:
+             - $XSAPPNAME.RiskManager
+         - name: 'RiskViewer-${space}'
+           description: View Risks
+           role-template-references:
+             - $XSAPPNAME.RiskViewer
+
+
+  - name: cpapp-destination
+    type: org.cloudfoundry.managed-service
+    parameters:
+     service: destination
+     service-plan: lite
+     config:
+       HTML5Runtime_enabled: true
+
+
+  - name: cpapp-html5-repo-host  #SAP HTML5 Application Repository 서비스 인스턴스의 대상. 이를 통해 SAP Launchpad 서비스가 UI 애플리케이션에 액세스 할 수 있음.
+    type: org.cloudfoundry.managed-service
+    parameters:
+     service: html5-apps-repo
+     service-plan: app-host
+
+
+  - name: cpapp-destinations
+    type: com.sap.application.content
+    requires:
+     - name: cpapp-uaa
+       parameters:
+         service-key:
+           name: cpapp-uaa-key
+     - name: cpapp-html5-repo-host
+       parameters:
+         service-key:
+           name: cpapp-html5-repo-host-key
+     - name: srv-api
+     - name: cpapp-destination
+       parameters:
+         content-target: true
+    parameters:
+     content:
+       instance:
+         destinations:
+           - Authentication: OAuth2UserTokenExchange
+             Name: cpapp-app-srv
+             TokenServiceInstanceName: cpapp-uaa
+             TokenServiceKeyName: cpapp-uaa-key
+             URL: '~{srv-api/srv-url}'
+             sap.cloud.service: cpapp.service
+           - Name: cpapp-html5-repo-host
+             ServiceInstanceName: cpapp-html5-repo-host
+             ServiceKeyName: cpapp-html5-repo-host-key
+             sap.cloud.service: cpapp.service
+           - Authentication: OAuth2UserTokenExchange
+             Name: cpapp-uaa
+             ServiceInstanceName: cpapp-uaa
+             ServiceKeyName: cpapp-uaa-key
+             sap.cloud.service: cpapp.service
+         existing_destinations_policy: update
+    build-parameters:
+     no-source: true
